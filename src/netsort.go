@@ -11,10 +11,32 @@ import (
 	"net"
 	"time"
 	"sync"
+//	"sort"
 )
 
-type msg [101]byte
 
+type entry []byte
+type registry []entry
+
+func (r registry) Len() int {
+	return len(r)
+}
+
+func (r registry) Swap(i, j int) {
+	r[i], r[j] = r[j], r[i]
+}
+
+func (r registry) Less(i, j int) bool {
+	for b := 0; b < 10; b++ {
+		if r[i][b] > r[j][b] {
+			return false
+		} else if r[i][b] < r[j][b] {
+			return true
+		}
+	}
+	return false
+
+}
 type ServerConfigs struct {
 	Servers []struct {
 		ServerId int    `yaml:"serverId"`
@@ -73,7 +95,7 @@ func consolidateServerData(ch <-chan []byte, data []byte, serverId int, numOfCli
 			break
 		}
 		message := <-ch // receive data from channel
-		if(message[0] == byte(1)) {
+		if(message[0] == byte(0xFF)) {
 			numOfClientsCompleted++
 			fmt.Println("Server ", serverId, " Found an end of stream msg")
 		}
@@ -82,27 +104,45 @@ func consolidateServerData(ch <-chan []byte, data []byte, serverId int, numOfCli
 	}
 }
 
-//func dataSieve(r []byte, binId byte) {
-//	if(byte(r[0]) &  byte(12) == binId) {
-//		return true
-//	}
-//	return false
-//}
+func bitsToShift(serverNum int) int {
+	if(serverNum > 8) {
+		return 4
+	} else if(serverNum > 4) {
+		return 3
+	} else if(serverNum > 2) {
+		return 2
+	}
+	return 1
 
-func sendData(data []byte, cType string, serverId int, host string, port string) {
-	fmt.Println("Server " + strconv.Itoa(serverId) + " requesting " + cType + " connection on connHost: " + host + ", connPort: " + port)
-	conn, err := net.Dial(cType, host+":"+port)
+}
+
+func sendData(data []byte, cType string, serverNum int, senderId int, receiverId int, host string, port string) {
+	fmt.Printf("Server %d requesting %s connection on connHost: %s:%s\n", senderId, cType, host, port)
+	d := net.Dialer{Timeout: 100*time.Millisecond}
+	conn, err := d.Dial("tcp", host+":"+port)
 	for err != nil {
-		time.Sleep(250*time.Millisecond)
+		time.Sleep(500*time.Millisecond)
+		fmt.Printf("Server %d retrying %s connection on connHost: %s:%s\n", senderId, cType, host, port)
 		conn, err = net.Dial(cType, host+":"+port)
 	}
-	fmt.Println("Server " + strconv.Itoa(serverId) + " connected to" + host + ":" + port)
-	defer conn.Close()
-	dataToSend := append([]byte{0xFF}, data[serverId*100:(serverId+1)*100]...)
-	conn.Write(dataToSend)
-	fmt.Println("Server " + strconv.Itoa(serverId) + " sent message starting with " + strconv.Itoa(int(dataToSend[0])))
+	if err != nil  {
+		log.Fatalf("Server %d failed to connect to %s:%s: %s", senderId, cType, host, port, err)
+	}
+	fmt.Println("Server " + strconv.Itoa(senderId) + " connected to " + host + ":" + port)
+
+	shift := byte(bitsToShift(serverNum))
+	for i := 0; i < len(data); i = i+100 {
+		if int(data[i] >> shift) == receiverId {
+			dataToSend := append([]byte{0xFF}, data[i:i+100]...)
+			conn.Write(dataToSend)
+			fmt.Printf("Server %d sent message starting with %X to %d\n", senderId, dataToSend[1], receiverId)
+		}
+	}
+	msgEnd := make([]byte, 101)
+	msgEnd[0] = byte(0xFF)
+	conn.Write(append(msgEnd))
 	conn.Close()
-	fmt.Println("Server " + strconv.Itoa(serverId) + " closed connection to " + port + " in sendData")
+	fmt.Println("Server " + strconv.Itoa(senderId) + " closed connection to " + port + " in sendData")
 }
 
 
@@ -125,7 +165,7 @@ func main() {
 	fmt.Println("Server " + strconv.Itoa(serverId) + ": Got the following server configs:", scs)
 	serverNum := len(scs.Servers)
 	fmt.Println("Number of servers: ", strconv.Itoa(serverNum))
-	
+
 	//Set up listener
 	listenChannel := make(chan []byte)
 	defer close(listenChannel)
@@ -135,18 +175,6 @@ func main() {
 
 
 
-
-	//Handwritten Server id's
-	binId := byte(0)
-	if(serverId == 0) {
-		binId = byte(0x0)
-	} else if(serverId == 1) {
-		binId = byte(0x4)
-	} else if(serverId == 2) {
-		binId = byte(0x8)
-	} else {
-		binId =  byte(0xC)
-	}
 
 	//Read data from our input file
 	infileName := os.Args[2]
@@ -163,38 +191,60 @@ func main() {
 
 	filesize := fileinfo.Size()
 	d := make([]byte, filesize)
-	infile.Read(d)
+	_, err = infile.Read(d)
+	if err != nil {
+		log.Fatalf("Server %d: unable to read data.\n")
+	}
 
 	infile.Close()
-
+	time.Sleep(500*time.Millisecond)
 	//Set up talkers
 	var talkers sync.WaitGroup
 	fmt.Println("Server " + strconv.Itoa(serverId) + " Starting up connections")
 	for s := 0; s < serverNum; s++ {
-		fmt.Println("Loop: " + strconv.Itoa(s))
-		if s != serverId {
-			go func(S int) {
-				defer talkers.Done()
-			fmt.Println("Server " + strconv.Itoa(serverId) + " connecting to " + strconv.Itoa(S))
+		if s == serverId {
+			continue
+		}
+		talkers.Add(1)
+		go func(S int) {
 			neighborHost := string(scs.Servers[S].Host)
 			neighborPort := string(scs.Servers[S].Port)
-			talkers.Add(1)
-			sendData(d, "tcp", S, neighborHost, neighborPort)
-			} (s)
-		}
+			fmt.Printf("Server %d connecting to %d at %s:%s\n", serverId, S, neighborHost, neighborPort)
+			sendData(d, "tcp", serverNum, serverId, S, neighborHost, neighborPort)
+			talkers.Done()
+		} (s)
 	}
+//	talkers.Add(1)
+//	go func(ch chan<- []byte) {
+//		shift := byte(bitsToShift(serverNum))
+//		for i := 0; i < len(d); i = i+100 {
+//			if int(d[i] >> shift) == serverId {
+//				ch <- append([]byte{0x00}, d[i:i+100]...)
+//				fmt.Printf("Server %d found its own record with first byte %x\n", serverId, d[i])
+//			}
+//		}
+//		ch <- append([]byte{0xFF}, d[0:100]...)
+//		talkers.Done()
+//	}(listenChannel)
 	talkers.Wait()
-	//Go through all the records, print out the ones we don't want\
 
-	for i:= 0; i < int(filesize); i=i+100 {
-		if(byte(d[i]) &  byte(12) != binId) {
-//			fmt.Printf("Server %x: removing %x\n", serverId, byte(d[i]) &  byte(12))
-		}
-	}
-	
-	sievedData := make([]byte, filesize)
+
+	var sievedData []byte
 	consolidateServerData(listenChannel, sievedData, serverId, serverNum-1)
 
-	fmt.Println("Should be done!")
+	fmt.Printf("Server %d Should be done sieving data!\n", serverId)
 
+//	sort.Sort(registry(sievedData))
+
+//	outfile, err := os.OpenFile(os.Args[2], os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0666)
+//	if(err != nil) {
+//		log.Fatalf("Unable to open %v as ouput file\n", os.Args[2])
+//	}
+//	for i:=0; i <num_entries;i++ {
+//		_, err = outfile.Write(entries[i])
+//		if(err != nil) {
+//			log.Fatalf("Unable to write to %v\n", os.Args[2])
+//		}
+//	}
+//	outfile.Close()
 }
