@@ -173,15 +173,14 @@ func main() {
 	for s := 0; s < serverNum; s++ {
 		fmt.Println("Loop: " + strconv.Itoa(s))
 		if s != serverId {
-			fmt.Println("Server " + strconv.Itoa(serverId) + " connecting to " + strconv.Itoa(s))
-			neighborHost := string(scs.Servers[s].Host)
-			neighborPort := string(scs.Servers[s].Port)
-			talkers.Add(1)
-			S := s
-			go func() {
+			go func(S int) {
 				defer talkers.Done()
-				sendData(d, "tcp", S, neighborHost, neighborPort)
-			} ()
+			fmt.Println("Server " + strconv.Itoa(serverId) + " connecting to " + strconv.Itoa(S))
+			neighborHost := string(scs.Servers[S].Host)
+			neighborPort := string(scs.Servers[S].Port)
+			talkers.Add(1)
+			sendData(d, "tcp", S, neighborHost, neighborPort)
+			} (s)
 		}
 	}
 	talkers.Wait()

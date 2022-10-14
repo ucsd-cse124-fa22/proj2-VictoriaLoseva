@@ -1,7 +1,15 @@
 #!/bin/bash
 
+##Handle killing parallel processes
+trap stop INT
+function stop() {
+	  pkill -f netsort
+	  echo "\nEnded processes"
+}
+
 ##Remove old netsort executable
 rm -f netsort
+rm nohup.out
 
 ##Build netsort
 go build -o netsort netsort.go
